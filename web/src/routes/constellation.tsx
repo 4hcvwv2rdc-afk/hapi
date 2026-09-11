@@ -112,10 +112,19 @@ export default function ConstellationPage() {
     const error = machines.error || sessions.error
     const ready = online && !error && !loading
     return (
-        <div className="flex h-full min-h-0 flex-col overflow-y-auto">
-            <ConstellationFleetView machines={machines.machines} sessions={sessions.sessions}
-                loading={loading} error={error} online={online} onRetry={retry} />
-            {ready && api && <ConstellationSessionOperations api={api} sessions={sessions.sessions} />}
+        <div className="flex h-full min-h-0 flex-col">
+            {/* Bounded to half the viewport so ConstellationFleetView's own `h-full` resolves
+                against a real ancestor height instead of claiming the whole page and overlapping
+                the operations panel below it (measured via a headless render before this fix). */}
+            <div className="min-h-0 shrink-0 basis-1/2 overflow-hidden">
+                <ConstellationFleetView machines={machines.machines} sessions={sessions.sessions}
+                    loading={loading} error={error} online={online} onRetry={retry} />
+            </div>
+            {ready && api && (
+                <div className="min-h-0 flex-1 overflow-hidden">
+                    <ConstellationSessionOperations api={api} sessions={sessions.sessions} />
+                </div>
+            )}
         </div>
     )
 }

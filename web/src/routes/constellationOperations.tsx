@@ -103,8 +103,8 @@ export function ConstellationSessionOperations(props: {
     }
 
     return (
-        <section className="border-t border-[var(--app-divider)]" aria-label="Session operations">
-            <div className="px-4 py-3">
+        <section className="flex h-full min-h-0 flex-col border-t border-[var(--app-divider)]" aria-label="Session operations">
+            <div className="shrink-0 px-4 py-3">
                 <h2 className="text-sm font-semibold">Session operations</h2>
                 <p className="mt-1 text-sm text-[var(--app-hint)]">
                     Send message, resume, and hand off use HAPI's existing transactions. Nothing here shows success until HAPI confirms it.
