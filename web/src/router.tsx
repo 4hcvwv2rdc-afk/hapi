@@ -73,6 +73,7 @@ import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
 import SharePage from '@/routes/share'
+import ConstellationPage from '@/routes/constellation'
 import { retargetSharePendingTransfer, setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, parseShareSearch } from '@/lib/shareTransfer'
 
@@ -1181,6 +1182,12 @@ const browseRoute = createRoute({
     component: BrowsePage,
 })
 
+const constellationRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/constellation',
+    component: ConstellationPage,
+})
+
 const settingsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/settings',
@@ -1277,6 +1284,7 @@ export const routeTree = rootRoute.addChildren([
         ]),
     ]),
     browseRoute,
+    constellationRoute,
     settingsRoute.addChildren([
         settingsIndexRoute,
         settingsGeneralRoute,
