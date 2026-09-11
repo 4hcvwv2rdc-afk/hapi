@@ -52,12 +52,14 @@ check's output as provisional until that mapping is confirmed on the gates side.
 
 ```bash
 HAPI_CLI_TOKEN=<your CLI_API_TOKEN> \
-HAPI_MACHINE_ID=<a machine with AgentAvailability> \
+HAPI_MACHINE_ID=<a machine with agent-availability> \
 WATCHDOG_GATES_PY=/path/to/watchdog-gates.py \
-node scripts/dev/constellation-watchdog-integration-check.mjs
+node scripts/dev/constellation-watchdog-integration-check.mjs --spawn-dir <path inside that machine's workspace roots>
 ```
 
 Discovery and the Watchdog-gate preflight/cleanup-eligibility checks run with just
 `HAPI_CLI_TOKEN`. The send/resume/handoff/failure/pending checks additionally spawn one disposable
-verification session on `HAPI_MACHINE_ID` and archive it when done — never against an existing
-session.
+verification session on `HAPI_MACHINE_ID` at `--spawn-dir` and archive it when done — never against
+an existing session. `--spawn-dir` must be inside that machine's configured workspace roots (a
+runner rejects anything else, `/tmp` included, and there is no portable disposable-scratch root
+across runners) — pick it deliberately; the script will not guess one of your checkouts for you.

@@ -22,6 +22,11 @@
  *   WATCHDOG_GATES_PY   absolute path to watchdog-gates.py. If unset, every Watchdog-gate step is
  *                       reported as "skipped: WATCHDOG_GATES_PY not set" rather than faked.
  *
+ * --spawn-dir DIR      required together with HAPI_MACHINE_ID for the spawn-backed checks - must
+ *                       be inside that machine's configured workspace roots (a runner rejects any
+ *                       other directory, /tmp included). There is no portable disposable-scratch
+ *                       root across runners, so this is a deliberate caller choice, not a guess.
+ *
  * This never performs Watchdog cleanup (automatic cleanup is off in that module, no flag exists to
  * turn it on) and never invents Watchdog verdicts - if a check can't be honestly populated with
  * measured data, it is reported skipped, not simulated.
@@ -37,7 +42,12 @@ const MACHINE_ID = process.env.HAPI_MACHINE_ID
 const GATES_PY = process.env.WATCHDOG_GATES_PY
 const SPAWN_DIR = (() => {
     const idx = process.argv.indexOf('--spawn-dir')
-    return idx >= 0 ? process.argv[idx + 1] : '/tmp'
+    if (idx >= 0) return process.argv[idx + 1]
+    // No portable disposable-scratch root exists on every runner (a runner only accepts spawns
+    // inside its configured workspace roots, and /tmp is outside all of them, measured above) -
+    // this MUST be passed explicitly with --spawn-dir so the caller picks it deliberately rather
+    // than this script guessing which of the operator's real checkouts to spawn a session into.
+    return null
 })()
 
 if (!TOKEN) {
@@ -213,9 +223,9 @@ async function main() {
         record('watchdog-cleanup-eligibility-stays-manual-gated', true, cleanup.reason)
     }
 
-    if (!MACHINE_ID) {
+    if (!MACHINE_ID || !SPAWN_DIR) {
         record('spawn-backed checks (send/resume/handoff/failure/pending)', true,
-            'skipped: HAPI_MACHINE_ID not set - discovery and Watchdog-gate checks above still ran')
+            `skipped: ${!MACHINE_ID ? 'HAPI_MACHINE_ID' : '--spawn-dir'} not set - discovery and Watchdog-gate checks above still ran`)
         summary.steps = steps
         console.log(JSON.stringify(summary, null, 2))
         return
@@ -246,12 +256,29 @@ async function main() {
         return
     }
 
+    // Whichever session id is "live" right now - archived in `finally` below no matter where the
+    // sequence stops, so a failure partway through never leaves an orphaned test session behind.
+    let liveSessionId = sessionId
     try {
+        // A freshly-spawned session is not immediately ready to receive messages (measured: an
+        // immediate send got 409 "Session is inactive" against a real spawn). Wait for HAPI's own
+        // state to say it's active first, exactly like resumeSessionVerified already does.
+        const spawnReady = await pollUntil(
+            () => api(`/sessions/${encodeURIComponent(sessionId)}`),
+            (r) => r.session.active === true,
+            { timeoutMs: 30000 },
+        )
+        record('spawned-session-reaches-active', spawnReady.status === 'verified', spawnReady.status)
+
         // 5. Message send, verified via the real queued-state endpoint (same contract as
         // web/src/lib/sessionOperations.ts#sendMessageVerified).
         const localId = `integration-check-${sessionId}-${Date.now()}`
         await api(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
-            method: 'POST', body: JSON.stringify({ text: 'integration check: hello', localId }),
+            method: 'POST', body: JSON.stringify({
+                text: 'Automated integration check. Do not read files, run commands, or take any '
+                    + 'action - this message only exists to verify delivery. Reply with "ack".',
+                localId,
+            }),
         })
         const sendOutcome = await pollUntil(
             () => api(`/sessions/${encodeURIComponent(sessionId)}/messages/queued-state`, {
@@ -270,6 +297,7 @@ async function main() {
 
         // 7. Resume, verified.
         const resumed = await api(`/sessions/${encodeURIComponent(sessionId)}/resume`, { method: 'POST', body: JSON.stringify({}) })
+        liveSessionId = resumed.sessionId
         const resumeOutcome = await pollUntil(
             () => api(`/sessions/${encodeURIComponent(resumed.sessionId)}`),
             (r) => r.session.active === true,
@@ -293,14 +321,20 @@ async function main() {
         } catch (error) {
             record('failure-case-bogus-resume', error.status === 404 || error.status === 403, `status=${error.status}`)
         }
-
-        // 10. Clean up the one disposable session this script created (routine session archive -
-        // not Watchdog worker-folder cleanup, which stays untouched and manual-gated per above).
-        await api(`/sessions/${encodeURIComponent(handoffTargetId)}/archive`, { method: 'POST', body: JSON.stringify({}) })
-        record('archive-disposable-verification-session', true, handoffTargetId)
     } catch (error) {
         record('spawn-backed-checks', false, error.message)
         summary.ok = false
+    } finally {
+        // 10. Clean up the one disposable session this script created (routine session archive -
+        // not Watchdog worker-folder cleanup, which stays untouched and manual-gated per above).
+        // Runs even if an earlier step threw, so nothing is left orphaned in the session list.
+        try {
+            await api(`/sessions/${encodeURIComponent(liveSessionId)}/archive`, { method: 'POST', body: JSON.stringify({}) })
+            record('archive-disposable-verification-session', true, liveSessionId)
+        } catch (error) {
+            record('archive-disposable-verification-session', false, `${liveSessionId}: ${error.message}`)
+            summary.ok = false
+        }
     }
 
     summary.steps = steps
