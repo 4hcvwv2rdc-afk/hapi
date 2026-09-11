@@ -26,7 +26,7 @@
  * turn it on) and never invents Watchdog verdicts - if a check can't be honestly populated with
  * measured data, it is reported skipped, not simulated.
  */
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -48,13 +48,30 @@ if (!TOKEN) {
 const steps = []
 function record(name, ok, detail) {
     steps.push({ name, ok, detail })
+    // Printed as each step lands, not just in the final summary - a run that stalls is visible
+    // immediately instead of producing zero output until it finishes or is killed.
+    console.error(`[${ok ? 'ok' : 'FAIL'}] ${name}: ${detail}`)
     return ok
+}
+
+// The REST API takes a short-lived JWT (POST /api/auth), not the raw CLI_API_TOKEN directly -
+// this mirrors exactly what the web app's login screen does with the same token.
+let jwt = null
+async function login() {
+    const res = await fetch(`${API_URL}/api/auth`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ accessToken: TOKEN }),
+    })
+    const body = await res.json()
+    if (!res.ok) throw new Error(`login failed: ${res.status} ${JSON.stringify(body)}`)
+    jwt = body.token
 }
 
 async function api(path, init = {}) {
     const res = await fetch(`${API_URL}/api${path}`, {
         ...init,
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers || {}) },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}`, ...(init.headers || {}) },
     })
     const text = await res.text()
     let body
@@ -79,22 +96,34 @@ async function pollUntil(fetchLatest, isVerified, { intervalMs = 1000, timeoutMs
     }
 }
 
-/** Run watchdog-gates.py with a JSON payload on stdin. Never invoked if GATES_PY is unset. */
-async function runGate(args, payload) {
-    if (!GATES_PY) return { skipped: true, reason: 'WATCHDOG_GATES_PY not set' }
-    try {
-        const { stdout } = await execFileAsync('python3', [GATES_PY, '--payload', '-', ...args], {
-            input: JSON.stringify(payload),
+/**
+ * Run watchdog-gates.py with a JSON payload on stdin. Never invoked if GATES_PY is unset.
+ * `execFile`'s async form has no `input` option (that's only on the *Sync variants) - the payload
+ * has to be written to the child's stdin directly and the stream closed, or the process blocks
+ * forever waiting on a stdin that never arrives. Measured: the first version of this function used
+ * `{ input }` on the async call and hung indefinitely against a live run.
+ */
+function runGate(args, payload) {
+    if (!GATES_PY) return Promise.resolve({ skipped: true, reason: 'WATCHDOG_GATES_PY not set' })
+    return new Promise((resolve) => {
+        const child = spawn('python3', [GATES_PY, '--payload', '-', ...args])
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', (chunk) => { stdout += chunk })
+        child.stderr.on('data', (chunk) => { stderr += chunk })
+        child.on('error', (error) => resolve({ skipped: true, reason: `watchdog-gates.py invocation failed: ${error.message}` }))
+        child.on('close', () => {
+            // A non-zero exit is the gate's own "deny"/"critical" signal, not a script failure -
+            // watchdog-gates.py prints its JSON verdict either way and encodes the verdict in argv.
+            try {
+                resolve({ skipped: false, result: JSON.parse(stdout) })
+            } catch {
+                resolve({ skipped: true, reason: `watchdog-gates.py produced no parseable JSON: ${stderr || stdout}` })
+            }
         })
-        return { skipped: false, result: JSON.parse(stdout) }
-    } catch (error) {
-        // A non-zero exit is the gate's own "deny"/"critical" signal, not a script failure -
-        // watchdog-gates.py prints its JSON verdict either way and encodes the verdict in argv.
-        if (error.stdout) {
-            try { return { skipped: false, result: JSON.parse(error.stdout) } } catch { /* fall through */ }
-        }
-        return { skipped: true, reason: `watchdog-gates.py invocation failed: ${error.message}` }
-    }
+        child.stdin.write(JSON.stringify(payload))
+        child.stdin.end()
+    })
 }
 
 /** Independently measure this worker's own checkpoint ref from the durable remote - never from a
@@ -112,6 +141,18 @@ async function measureOwnCheckpoint() {
 
 async function main() {
     const summary = { ok: true, apiUrl: API_URL, steps: null }
+
+    try {
+        await login()
+        record('login', true, 'JWT obtained (4h), never logged')
+    } catch (error) {
+        record('login', false, error.message)
+        summary.ok = false
+        summary.steps = steps
+        console.log(JSON.stringify(summary, null, 2))
+        process.exitCode = 1
+        return
+    }
 
     // 1. Session discovery
     let sessions, machines
@@ -159,14 +200,15 @@ async function main() {
         (preflightHandoff.skipped ? preflightHandoff.reason : preflightHandoff.result.reasons.join('; '))
         + ' [op_type mapping: handoff -> "move", unconfirmed]')
 
-    // 3. Manual-gated cleanup: must come back ineligible here, since none of this run's evidence
-    // includes an independently-confirmed checkpoint-SHA readback or owner authorisation. Nothing
-    // is deleted regardless of the verdict - this step only ever evaluates eligibility.
-    const cleanup = await runGate([], { workers: [workerPayload] })
+    // 3. Manual-gated cleanup: cleanup_eligibility only runs through preflight_gate(op_type=
+    // "cleanup", ...) - evaluate_route (the no-flag call) never reaches it. Expected ineligible
+    // here, since this payload has neither an independently-confirmed checkpoint-SHA readback nor
+    // ownership/authorisation evidence. Nothing is deleted regardless of the verdict - this step
+    // only ever evaluates eligibility.
+    const cleanup = await runGate(['--preflight', 'cleanup'], { workers: [workerPayload] })
     if (!cleanup.skipped) {
-        const elig = cleanup.result.workers?.[0]
-        record('watchdog-cleanup-eligibility-stays-manual-gated', true,
-            `evaluated only, nothing deleted; hygiene findings=${elig?.findings?.length ?? 'n/a'}`)
+        record('watchdog-cleanup-eligibility-stays-manual-gated', cleanup.result.allow === false,
+            `eligible=${cleanup.result.allow} (expected false with no SHA-readback/ownership evidence); ${cleanup.result.reasons.join('; ')}`)
     } else {
         record('watchdog-cleanup-eligibility-stays-manual-gated', true, cleanup.reason)
     }
@@ -185,7 +227,13 @@ async function main() {
     try {
         const spawned = await api(`/machines/${encodeURIComponent(MACHINE_ID)}/spawn`, {
             method: 'POST',
-            body: JSON.stringify({ directory: SPAWN_DIR, sessionType: 'simple' }),
+            body: JSON.stringify({
+                directory: SPAWN_DIR,
+                sessionType: 'simple',
+                // Cheapest available model by default - this session only exists to prove the
+                // transaction wiring, never to do real work.
+                model: process.env.HAPI_SPAWN_MODEL || 'claude-haiku-4-5-20251001',
+            }),
         })
         sessionId = spawned.sessionId || spawned.session?.id
         record('spawn-disposable-verification-session', Boolean(sessionId), sessionId || JSON.stringify(spawned))
