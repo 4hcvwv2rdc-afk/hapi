@@ -6,6 +6,7 @@ import { useSessions } from '@/hooks/queries/useSessions'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { getMachineTitle } from '@/hooks/useMachineLabels'
 import type { Machine, SessionSummary } from '@/types/api'
+import { ConstellationSessionOperations } from './constellationOperations'
 
 export function constellationFleetEnabled(): boolean {
     return import.meta.env.VITE_CONSTELLATION_FLEET === 'true'
@@ -107,7 +108,14 @@ export default function ConstellationPage() {
     const sessions = useSessions(api)
     if (!constellationFleetEnabled()) return <Navigate to="/sessions" replace />
     const retry = () => { void Promise.all([machines.refetch(), sessions.refetch()]) }
-    return <ConstellationFleetView machines={machines.machines} sessions={sessions.sessions}
-        loading={machines.isLoading || sessions.isLoading} error={machines.error || sessions.error}
-        online={online} onRetry={retry} />
+    const loading = machines.isLoading || sessions.isLoading
+    const error = machines.error || sessions.error
+    const ready = online && !error && !loading
+    return (
+        <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+            <ConstellationFleetView machines={machines.machines} sessions={sessions.sessions}
+                loading={loading} error={error} online={online} onRetry={retry} />
+            {ready && api && <ConstellationSessionOperations api={api} sessions={sessions.sessions} />}
+        </div>
+    )
 }

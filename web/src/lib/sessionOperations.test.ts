@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
+import type { SessionResponse } from '@/types/api'
 import { handoffToRemoteVerified, resumeSessionVerified, sendMessageVerified } from './sessionOperations'
+
+/** Partial-session fixture, cast once here instead of scattered `as never`s below. */
+function sessionResponse(partial: Record<string, unknown>): SessionResponse {
+    return { session: partial } as unknown as SessionResponse
+}
 
 function createMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
     return {
         resumeSession: vi.fn(async () => 'session-A'),
         switchSession: vi.fn(async () => undefined),
         sendMessage: vi.fn(async () => undefined),
-        getSession: vi.fn(async () => ({ session: { id: 'session-A', active: false } as never })),
+        getSession: vi.fn(async () => sessionResponse({ id: 'session-A', active: false })),
         getQueuedState: vi.fn(async () => ({ queuedLocalIds: [], invokedLocalMessages: [] })),
         ...overrides,
     } as ApiClient
@@ -32,8 +38,8 @@ describe('sessionOperations', () => {
 
         it('does not report verified until a read shows the session active', async () => {
             const getSession = vi.fn()
-                .mockResolvedValueOnce({ session: { id: 'session-A', active: false } })
-                .mockResolvedValueOnce({ session: { id: 'session-A', active: true } })
+                .mockResolvedValueOnce(sessionResponse({ id: 'session-A', active: false }))
+                .mockResolvedValueOnce(sessionResponse({ id: 'session-A', active: true }))
             const api = createMockApi({ getSession })
             const promise = resumeSessionVerified(api, 'session-A', { intervalMs: 10 })
             await vi.advanceTimersByTimeAsync(10)
@@ -44,7 +50,7 @@ describe('sessionOperations', () => {
 
         it('follows the resumed session id returned by HAPI, not the requested id', async () => {
             const resumeSession = vi.fn(async () => 'session-B')
-            const getSession = vi.fn(async (id: string) => ({ session: { id, active: id === 'session-B' } }))
+            const getSession = vi.fn(async (id: string) => sessionResponse({ id, active: id === 'session-B' }))
             const api = createMockApi({ resumeSession, getSession })
             const outcome = await resumeSessionVerified(api, 'session-A')
             expect(outcome).toEqual({ status: 'verified' })
@@ -63,8 +69,8 @@ describe('sessionOperations', () => {
     describe('handoffToRemoteVerified', () => {
         it('does not report verified while HAPI still shows local (terminal) control', async () => {
             const getSession = vi.fn()
-                .mockResolvedValueOnce({ session: { id: 'session-A', active: true, agentState: { controlledByUser: true } } })
-                .mockResolvedValueOnce({ session: { id: 'session-A', active: true, agentState: { controlledByUser: false } } })
+                .mockResolvedValueOnce(sessionResponse({ id: 'session-A', active: true, agentState: { controlledByUser: true } }))
+                .mockResolvedValueOnce(sessionResponse({ id: 'session-A', active: true, agentState: { controlledByUser: false } }))
             const api = createMockApi({ getSession })
             const promise = handoffToRemoteVerified(api, 'session-A', { intervalMs: 10 })
             await vi.advanceTimersByTimeAsync(10)
